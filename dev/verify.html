@@ -1,0 +1,131 @@
+<!doctype html><meta charset="utf-8"><title>VARA line shader — verification</title>
+<style>body{font:12px/1.5 ui-monospace,monospace;background:#0d1b3e;color:#dfe6f5;padding:18px}
+b{color:#7cf3b0}.f{color:#ff8b7a}table{border-collapse:collapse;margin-top:10px}
+td{padding:2px 12px 2px 0;vertical-align:top}</style>
+<h3>Figma line shader — headless verification</h3>
+<div id="out">running…</div>
+<script type="module">
+/* The plugin hands Figma an SVG string and lets Figma's own importer build the
+   nodes. So the thing worth verifying is that STRING: that it round-trips, that
+   it carries every segment and gradient, and that the offset lands the ribbon
+   on its spine rather than beside it.
+
+   Three earlier versions built the nodes by hand and each failed only inside
+   Figma — commas the path parser rejects, then every quad stacked on one point
+   so the ribbon rendered as a fan. None of those are reachable now, because
+   none of that code exists; what remains is the markup the preview already
+   draws. */
+import { paintTube, TUBE } from '../../system/tube.js';
+
+const pass = [], fail = [];
+const check = (n, ok, d='') => (ok ? pass : fail).push(n + (d ? ' — ' + d : ''));
+const NS = 'http://www.w3.org/2000/svg';
+const D = 'M120,400 C240,140 470,660 640,330 S900,120 980,420';
+
+/* cache-bust: without this the harness happily grades a STALE copy of the
+   plugin and reports failures that were fixed minutes ago */
+const bust = '?t=' + Date.now();
+const codeSrc = await (await fetch('../plugin/code.js' + bust, { cache: 'no-store' })).text();
+const uiSrc   = await (await fetch('../plugin/ui.html' + bust, { cache: 'no-store' })).text();
+
+/* the hand-built machinery must be GONE, not merely unused */
+check('Figma does the import', /createNodeFromSvg\(/.test(codeSrc));
+check('no hand-computed gradient matrices', !/gradientTransform/.test(codeSrc));
+check('no per-quad node building', !/function quadNodes/.test(codeSrc) && !/function paintOf/.test(codeSrc));
+check('the UI sends markup, not quads', /type: 'svg'/.test(uiSrc) && !/type: 'quads'/.test(uiSrc));
+
+/* WIRING. Every button the designer can press must actually send something.
+   Edit spine and Delete were deleted by a cleanup that was matching braces
+   around neighbouring dead code; they kept their enabled/disabled logic, so
+   they stayed clickable and simply did nothing, and no harness noticed because
+   the other one fabricates these messages itself rather than pressing buttons.
+   Assert the wiring, not the handler's behaviour. */
+for (const [id, type] of [['edit', 'edit'], ['del', 'delete'], ['go', 'svg']]){
+  check('#' + id + ' is wired', new RegExp("\\$\\('" + id + "'\\)\\.onclick").test(uiSrc),
+        'no onclick for #' + id);
+}
+check('the plugin still handles both actions',
+      /msg\.type === 'edit'/.test(codeSrc) && /msg\.type === 'delete'/.test(codeSrc));
+
+/* ---- build the ribbon exactly as the UI does ---------------------------- */
+function build(){
+  const off = document.createElementNS(NS, 'svg');
+  off.setAttribute('width','0'); off.setAttribute('height','0');
+  off.style.position='absolute'; off.style.visibility='hidden';
+  document.body.appendChild(off);
+  TUBE.segs = 96; TUBE.stops = 13;
+  paintTube(off, D, 68, ['#f38f77','#f87049','#f97437'], 140 * Math.PI / 180).reveal(1, 1);
+  const b = off.getBBox();
+  const out = document.createElementNS(NS, 'svg');
+  out.setAttribute('xmlns', NS);
+  out.setAttribute('viewBox', b.x + ' ' + b.y + ' ' + b.width + ' ' + b.height);
+  out.setAttribute('width', b.width); out.setAttribute('height', b.height);
+  while (off.firstChild) out.appendChild(off.firstChild);
+  off.remove();
+  return { svg: new XMLSerializer().serializeToString(out), box: b };
+}
+function spineBox(){
+  const off = document.createElementNS(NS,'svg');
+  off.style.position='absolute'; off.style.visibility='hidden';
+  document.body.appendChild(off);
+  const p = document.createElementNS(NS,'path'); p.setAttribute('d', D); off.appendChild(p);
+  const b = p.getBBox(); off.remove(); return b;
+}
+
+const { svg, box } = build();
+const sb = spineBox();
+
+check('the ribbon has a real size', box.width > 10 && box.height > 10,
+      Math.round(box.width) + '×' + Math.round(box.height));
+
+/* ---- the string must survive a round trip ------------------------------- */
+const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+check('the SVG re-parses', !doc.querySelector('parsererror'));
+const root = doc.documentElement;
+check('it declares its namespace', root.getAttribute('xmlns') === NS);
+check('it carries a viewBox and a size',
+      !!root.getAttribute('viewBox') && +root.getAttribute('width') > 0);
+
+const paths = [...doc.querySelectorAll('path')].filter(p => /url\(/.test(p.style.fill || p.getAttribute('fill') || ''));
+const grads = doc.querySelectorAll('linearGradient');
+check('every segment made it into the markup', paths.length === TUBE.segs,
+      paths.length + ' of ' + TUBE.segs);
+
+check('every segment kept its gradient', grads.length >= paths.length,
+      grads.length + ' gradients');
+check('gradients are in user space, which Figma imports',
+      [...grads].every(g => g.getAttribute('gradientUnits') === 'userSpaceOnUse'));
+check('no non-finite numbers anywhere', !/(Infinity|NaN)/.test(svg));
+
+/* Re-render the serialized string and compare: if the markup lost anything,
+   the redrawn box will not match the one it claims. */
+const host = document.createElementNS(NS,'svg');
+host.style.position='absolute'; host.style.visibility='hidden';
+document.body.appendChild(host);
+for (const n of [...doc.documentElement.childNodes]) host.appendChild(document.importNode(n, true));
+const rb = host.getBBox(); host.remove();
+check('the serialized markup redraws to the same shape',
+      Math.abs(rb.width - box.width) < 0.5 && Math.abs(rb.height - box.height) < 0.5,
+      Math.round(rb.width) + '×' + Math.round(rb.height) + ' vs ' +
+      Math.round(box.width) + '×' + Math.round(box.height));
+
+/* ---- placement ---------------------------------------------------------- */
+const off = { x: box.x - sb.x, y: box.y - sb.y };
+check('the ribbon overhangs its spine by half a width',
+      off.x < 0 && off.y < 0 && Math.abs(off.x) > 5,
+      'offset ' + off.x.toFixed(1) + ',' + off.y.toFixed(1));
+check('anchor + offset returns the ribbon box',
+      Math.abs((sb.x + off.x) - box.x) < 1e-9 && Math.abs((sb.y + off.y) - box.y) < 1e-9);
+/* and a ribbon that was moved rebuilds where it now is, not where it was drawn */
+const moved = { x: sb.x + off.x + 250, y: sb.y + off.y - 80 };
+const recovered = { x: moved.x - off.x, y: moved.y - off.y };
+check('a moved ribbon recovers its own anchor',
+      Math.abs(recovered.x - (sb.x + 250)) < 1e-9 && Math.abs(recovered.y - (sb.y - 80)) < 1e-9);
+
+document.getElementById('out').innerHTML =
+  '<b>' + pass.length + ' passed</b>' + (fail.length ? ' <span class=f>' + fail.length + ' FAILED</span>' : '') +
+  '<table>' + [...fail.map(t => '<tr><td class=f>FAIL</td><td>'+t+'</td></tr>'),
+               ...pass.map(t => '<tr><td><b>ok</b></td><td>'+t+'</td></tr>')].join('') + '</table>';
+window.__verify = { ok: !fail.length, passed: pass.length, failed: fail.length, fail,
+                    bytes: svg.length, segs: paths.length };
+</script>

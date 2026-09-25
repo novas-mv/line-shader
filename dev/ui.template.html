@@ -1,0 +1,312 @@
+<!-- GENERATED FILE — do not edit ui.html by hand.
+     Edit ui.template.html and run:  python3 tools/gen-figma-plugin.py
+     The shading engine below is system/tube.js, copied in verbatim so the
+     plugin and the website cannot drift apart. -->
+<!-- Without this the page is decoded as windows-1252 and every degree sign,
+     multiplication sign and dash renders as mojibake. -->
+<meta charset="utf-8">
+<style>
+  body{font:11px/1.45 -apple-system,system-ui,sans-serif;margin:0;padding:12px;color:#1b2430;background:#fff}
+  h1{font:600 11px/1 inherit;letter-spacing:.08em;text-transform:uppercase;margin:0 0 10px;color:#6b7684}
+  .row{display:flex;align-items:center;gap:8px;margin:7px 0}
+  .row label{flex:0 0 52px;color:#6b7684}
+  input[type=range]{flex:1;min-width:0}
+  .val{flex:0 0 34px;text-align:right;font-variant-numeric:tabular-nums;color:#6b7684}
+  .chips{display:flex;gap:4px;flex-wrap:wrap}
+  .chips button{border:1px solid #d9dde3;background:#fff;border-radius:5px;padding:3px 7px;cursor:pointer;font:inherit}
+  .chips button[aria-pressed=true]{background:#1b2430;color:#fff;border-color:#1b2430}
+  #prev{width:100%;height:120px;background:#0d1b3e;border-radius:6px;margin:10px 0;display:block}
+  #go{width:100%;padding:8px;border:0;border-radius:6px;background:#1b2430;color:#fff;font:600 11px/1 inherit;cursor:pointer}
+  #go:disabled{background:#c8cdd4;cursor:default}
+  .crud{display:flex;gap:6px;margin-top:6px}
+  .minor{flex:1;padding:6px;border:1px solid #d9dde3;background:#fff;border-radius:6px;font:inherit;cursor:pointer}
+  .minor:disabled{color:#b6bcc4;border-color:#e8ebef;cursor:default}
+  .danger:not(:disabled){color:#a3372f;border-color:#e6c9c5}
+  #adv{margin:6px 0 2px}
+  #adv summary{cursor:pointer;color:#6b7684;font-size:10px;letter-spacing:.06em;
+               text-transform:uppercase;padding:3px 0;user-select:none}
+  #adv[open] summary{margin-bottom:4px}
+  #msg{margin-top:8px;min-height:15px;color:#a3372f}
+  .hint{color:#8d96a3}
+</style>
+
+<h1>Line shader</h1>
+<div class="row"><label>Colour</label><div class="chips" id="hues"></div></div>
+<div class="row"><label>Weight</label><div class="chips" id="ws"></div></div>
+<div class="row"><label>Light</label><input id="light" type="range" min="0" max="360" value="140"><span class="val" id="vL"></span></div>
+
+<!-- Everything below is calibrated and should not need touching. It is folded
+     away because a designer who is trying to draw a line should not have to
+     decide about segment counts, and because most of these knobs cannot fix
+     what they look like they should fix. -->
+<details id="adv">
+  <summary>Advanced</summary>
+  <div class="row"><label>Fine weight</label><input id="w" type="range" min="12" max="160" value="68"><span class="val" id="vW"></span></div>
+  <div class="row"><label>Smooth ramp</label><input id="smooth" type="range" min="0" max="8" value="3"><span class="val" id="vSm"></span></div>
+  <div class="row"><label>Segments</label><input id="segs" type="range" min="12" max="160" value="96"><span class="val" id="vS"></span></div>
+  <div class="row"><label>Bands</label><input id="stops" type="range" min="3" max="21" value="13"><span class="val" id="vB"></span></div>
+  <div class="row"><label>Raster</label><input id="rscale" type="range" min="2" max="8" value="4"><span class="val" id="vR"></span></div>
+  <div class="row"><label>Vectors</label><input id="flat" type="checkbox" checked hidden><input id="vec" type="checkbox"><span class="hint">keep as editable shapes</span></div>
+  <div class="row"><label>Contrast</label><input id="con" type="range" min="0" max="100" value="42"><span class="val" id="vC"></span></div>
+  <div class="row"><label>Sheen</label><input id="sheen" type="range" min="0" max="60" value="18"><span class="val" id="vSh"></span></div>
+  <div class="row"><label>Glow</label><input id="sss" type="range" min="0" max="60" value="20"><span class="val" id="vG"></span></div>
+  <div class="row"><label>Wrap</label><input id="wrap" type="range" min="0" max="100" value="66"><span class="val" id="vWr"></span></div>
+</details>
+
+<svg id="prev" preserveAspectRatio="xMidYMid meet"></svg>
+<button id="go" disabled>Select a path</button>
+<div class="crud">
+  <button id="edit" class="minor" disabled>Edit spine</button>
+  <button id="del" class="minor danger" disabled>Delete</button>
+</div>
+<div id="msg"></div>
+
+<script>
+/* ===== system/tube.js (verbatim, module keywords stripped) ================= */
+/* @@TUBE@@ */
+/* ========================================================================== */
+
+const NSU = 'http://www.w3.org/2000/svg';
+const HUES = /* @@STROKES@@ */;
+/* Segments resolve the ribbon ALONG the spine; bands resolve the shading
+   ACROSS it. Only segments were adjustable, so a ribbon could be stepped
+   across its width at any segment count and there was no control that helped.
+   Both are exposed now, along with the material terms the site tunes. */
+let state = { d: null, hue: 'coral', w: 68, light: 140,
+              segs: 96, stops: 13, con: 42, sheen: 18, sss: 20, wrap: 66, smooth: 3,
+              exists: false };
+
+const $ = id => document.getElementById(id);
+const msg = t => { $('msg').textContent = t || ''; };
+
+/* ---- chips ---- */
+function chips(host, items, get, set){
+  host.innerHTML = '';
+  for (const it of items){
+    const b = document.createElement('button');
+    b.textContent = it.label;
+    b.setAttribute('aria-pressed', String(get() === it.value));
+    b.onclick = () => { set(it.value); chips(host, items, get, set); draw(); };
+    host.appendChild(b);
+  }
+}
+
+/* ---- the one place the ribbon is built ----------------------------------
+   Both the preview and the Figma output come from THIS call, so what the
+   designer sees and what lands on the canvas cannot disagree. */
+function paint(svg){
+  TUBE.segs  = state.segs;
+  TUBE.stops = state.stops;
+  TUBE.con   = state.con   / 100;
+  TUBE.sheen = state.sheen / 100;
+  TUBE.sss   = state.sss   / 100;
+  TUBE.wrap  = state.wrap  / 100;
+  /* the ramps are per-vertex samples off the traced artwork; a couple of them
+     are desaturated and read as pale bands once the ribbon is printed large */
+  TUBE.smooth = state.smooth;
+  return paintTube(svg, state.d, state.w, HUES[state.hue].colors, state.light * Math.PI / 180);
+}
+
+
+
+/* ---- preview ---- */
+function draw(){
+  $('vL').textContent = state.light + '°';
+  $('vS').textContent = state.segs;
+  $('vW').textContent = state.w + 'u';
+  $('vB').textContent = state.stops;
+  $('vC').textContent = state.con + '%';
+  $('vSh').textContent = state.sheen + '%';
+  $('vG').textContent = state.sss + '%';
+  $('vWr').textContent = state.wrap + '%';
+  $('vSm').textContent = state.smooth;
+  $('vR').textContent = $('rscale').value + '\u00d7';
+  const prev = $('prev');
+  while (prev.firstChild) prev.removeChild(prev.firstChild);
+  $('go').disabled = !state.d;
+  /* Edit spine is a vector-mode affordance. It does work on a flattened
+     ribbon — the curve is carried inside it — but reshaping something you
+     asked to be a picture is a confusing offer, so the button only exists
+     once Vectors is on. Hidden rather than disabled: a permanently greyed
+     button is just a question the designer keeps re-asking. */
+  $('edit').hidden = !$('vec').checked;
+  $('edit').disabled = !state.exists;
+  $('del').disabled = !state.exists;
+  if (!state.d){ $('go').textContent = 'Select a path'; return; }
+  $('go').textContent = $('flat').checked ? (state.exists ? 'Update + flatten' : 'Apply + flatten')
+                                          : (state.exists ? 'Update ribbon'    : 'Apply shading');
+  try {
+    const host = document.createElementNS(NSU, 'svg');
+    prev.appendChild(host);
+    paint(host).reveal(1, 1);   /* preview needs no shift — it has its own viewBox */
+    const b = host.getBBox();
+    prev.setAttribute('viewBox', [b.x-4, b.y-4, b.width+8, b.height+8].join(' '));
+    host.setAttribute('overflow', 'visible');
+    msg('');
+  } catch (e){ msg('Preview: ' + (e && e.message ? e.message : e)); }
+}
+
+/* ---- apply ----------------------------------------------------------------
+   Figma imports SVG natively — gradients and all — so the ribbon is handed
+   over as the SAME markup the preview draws, rather than rebuilt as 72 nodes
+   with hand-computed gradient matrices. Three earlier attempts failed in ways
+   only visible inside Figma (quads stacked into a fan, commas rejected by the
+   path parser); none of those failure modes exist when Figma does the import.
+*/
+function ribbonSVG(){
+  const off = document.createElementNS(NSU, 'svg');
+  off.setAttribute('width', '0'); off.setAttribute('height', '0');
+  off.style.position = 'absolute'; off.style.visibility = 'hidden';
+  document.body.appendChild(off);
+  try {
+    paint(off).reveal(1, 1);
+    const b = off.getBBox();
+    if (!(b.width > 0 && b.height > 0)) throw new Error('renderer produced an empty ribbon');
+    const out = document.createElementNS(NSU, 'svg');
+    out.setAttribute('xmlns', NSU);
+    out.setAttribute('viewBox', b.x + ' ' + b.y + ' ' + b.width + ' ' + b.height);
+    out.setAttribute('width', b.width);
+    out.setAttribute('height', b.height);
+    while (off.firstChild) out.appendChild(off.firstChild);
+    return { svg: new XMLSerializer().serializeToString(out),
+             box: { x: b.x, y: b.y, w: b.width, h: b.height } };
+  } finally { off.remove(); }
+}
+
+/* Where the spine's own box sits in artboard units. The ribbon is wider than
+   its spine, so the two boxes differ, and that difference is exactly the
+   offset Figma needs to land the ribbon ON the curve. */
+function spineBox(){
+  const off = document.createElementNS(NSU, 'svg');
+  off.style.position = 'absolute'; off.style.visibility = 'hidden';
+  document.body.appendChild(off);
+  const p = document.createElementNS(NSU, 'path');
+  p.setAttribute('d', state.d);
+  off.appendChild(p);
+  try {
+    const b = p.getBBox();
+    return { x: b.x, y: b.y };
+  } finally { off.remove(); }
+}
+
+/* Rasterise in the IFRAME, which is a real browser and blends the segments into
+   one surface. Figma keeps every quad as its own node with its own gradient and
+   composites them separately, which is why the canvas shows individual polygons
+   where the preview shows a ribbon — and why exporting the Figma node (what
+   flatten used to do) just rasterised that same broken picture. Drawing the SVG
+   here and handing Figma the pixels is the only way the result matches what the
+   designer is looking at. */
+let rasterNote = '';
+async function rasterise(svg, box, scale){
+  const img = new Image();
+  await new Promise((ok, no) => {
+    img.onload = ok;
+    img.onerror = () => no(new Error('the ribbon would not rasterise'));
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  });
+  /* Clamp the long edge. A big ribbon at 8x is over 4500px and 8MB, which has
+     to cross postMessage and then become a Figma image; rather than let a
+     designer discover the ceiling as a failure, quietly cap the scale and say
+     what was used. 4096 is the safe long edge. */
+  const LONG = 4096;
+  const longest = Math.max(box.w, box.h) || 1;
+  const capped = Math.min(scale, LONG / longest);
+  rasterNote = capped < scale
+    ? 'Rendered at ' + capped.toFixed(1) + '\u00d7 — ' + scale + '\u00d7 would exceed ' + LONG + 'px.'
+    : '';
+  const c = document.createElement('canvas');
+  c.width  = Math.max(1, Math.round(box.w * capped));
+  c.height = Math.max(1, Math.round(box.h * capped));
+  const ctx = c.getContext('2d');
+  ctx.drawImage(img, 0, 0, c.width, c.height);
+  const blob = await new Promise(r => c.toBlob(r, 'image/png'));
+  if (!blob) throw new Error('the canvas produced no image');
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+$('go').onclick = async () => {
+  if (!state.d) return;
+  try {
+    const { svg, box } = ribbonSVG();
+    const sb = spineBox();
+    const flat = $('flat').checked;
+    const png = flat ? await rasterise(svg, box, +$('rscale').value) : null;
+    parent.postMessage({ pluginMessage: {
+      type: 'svg', svg, png, size: { w: box.w, h: box.h },
+      offset: { x: box.x - sb.x, y: box.y - sb.y },
+      settings: { d: state.d, hue: state.hue, w: state.w, light: state.light,
+                  segs: state.segs, stops: state.stops, con: state.con,
+                  sheen: state.sheen, sss: state.sss, wrap: state.wrap,
+                  smooth: state.smooth, raster: +$('rscale').value,
+                  flatten: $('flat').checked }
+    }}, '*');
+    msg(rasterNote);
+  } catch (e){ msg('Apply: ' + (e && e.message ? e.message : e)); }
+};
+
+/* ---- from the main thread ---- */
+onmessage = ev => {
+  const m = ev.data && ev.data.pluginMessage;
+  if (!m) return;
+  if (m.type === 'error'){ msg(m.message); return; }
+  if (m.type !== 'spine') return;
+  if (m.err){ state.d = null; msg(m.err); draw(); return; }
+  state.d = m.d;
+  state.exists = !!m.exists;
+  /* A freshly drawn path carries no settings, so without this it would inherit
+     whatever the last selected ribbon used and the button would promise the
+     wrong operation. */
+  if (!m.settings){
+    $('flat').checked = true;
+    $('vec').checked  = false;
+  }
+  if (m.settings){
+    state.hue = m.settings.hue || state.hue;
+    for (const k of ['w','light','segs','stops','con','sheen','sss','wrap','smooth'])
+      if (m.settings[k] != null) state[k] = m.settings[k];
+    for (const k of ['w','light','segs','stops','con','sheen','sss','wrap','smooth'])
+      if ($(k)) $(k).value = state[k];
+    /* Restore HOW it was made, not just how it was shaded. Without this,
+       selecting a ribbon you deliberately kept as vectors and nudging anything
+       silently rasterised it, because the checkbox had snapped back to its
+       default and the button label was describing the wrong operation. */
+    if (m.settings.flatten != null){
+      $('flat').checked = !!m.settings.flatten;
+      $('vec').checked  = !m.settings.flatten;
+    }
+    if (m.settings.raster != null) $('rscale').value = m.settings.raster;
+    build();
+  }
+  msg('');
+  draw();
+};
+
+function build(){
+  chips($('hues'), Object.keys(HUES).map(k => ({ label: k, value: k })),
+        () => state.hue, v => state.hue = v);
+  chips($('ws'), [68, 56, 44].map(v => ({ label: String(v), value: v })),
+        () => state.w, v => { state.w = v; $('w').value = v; });
+}
+$('rscale').oninput = () => draw();
+
+/* One switch, phrased the way a designer thinks about it. Flatten is the
+   default because the vector form is ~96 separate gradient shapes that Figma
+   composites one at a time; the raster is what matches the preview. Ticking
+   Vectors opts into the editable-but-rougher form. */
+$('vec').onchange = () => { $('flat').checked = !$('vec').checked; draw(); };
+
+/* The action buttons. These were lost as collateral in 061165b, deleted in the
+   same hunk as the quad-building helpers they sat next to, and nothing noticed:
+   the buttons kept their enabled/disabled logic, so they looked alive and did
+   nothing. Note the message is 'delete' while the element is '#del' — the id
+   is an abbreviation, the protocol is not. */
+$('edit').onclick = () => parent.postMessage({ pluginMessage: { type: 'edit'   } }, '*');
+$('del').onclick  = () => parent.postMessage({ pluginMessage: { type: 'delete' } }, '*');
+for (const id of ['light','segs','stops','con','sheen','sss','wrap','w','smooth'])
+  $(id).oninput = () => { state[id] = +$(id).value; if (id === 'w') build(); draw(); };
+$('flat').onchange = draw;
+
+build();
+draw();
+parent.postMessage({ pluginMessage: { type: 'need-spine' } }, '*');
+</script>
