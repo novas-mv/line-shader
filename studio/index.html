@@ -1,0 +1,802 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Line studio</title>
+<!--
+  Generates brand line/shape/loop artwork and exports PNG/SVG.
+
+  WHY THIS EXISTS. The tube treatment is shaded in code: an SVG gradient cannot
+  follow a curve, so system/tube.js cuts a ribbon into segments and shades each
+  one across. That is a mesh, and a mesh cannot be edited in Figma — so artwork
+  exported from the site is a dead end for a designer. This tool puts the
+  generator itself in their hands.
+
+  IT IMPORTS THE REAL RENDERER. system/tube.js, unchanged, so there is no
+  second copy of the shading maths to drift from the site.
+
+  SHAPES ARE READ OUT OF system/lines.js AT RUNTIME rather than copied here,
+  for the same reason. lines.js is a classic script and exports nothing, so the
+  file is fetched and its SHAPES block parsed. If that block is ever
+  reformatted this tool fails loudly in self-test rather than quietly drifting.
+
+  Run it over the local server (module imports need http, not file://):
+     python3 -m http.server 8107   →   /tools/line-studio.html
+  ?selftest runs the whole matrix headlessly and writes window.__selftest.
+-->
+<style>
+:root{--navy-950:#00133F;--navy-900:#001A52;--navy:#001D61;--cream:#F3EDDF;--coral:#FF8A66;--green:#6BFE96}
+*{box-sizing:border-box}
+/* minmax, not 1fr. Two fixed 184/236 rails either side of a bare 1fr means
+   the canvas column collapses to ZERO the moment the window is narrower than
+   420px — the stage then has no measurable width, every pointer position
+   divides by it, and dragging silently does nothing. min-content keeps the
+   canvas alive and lets the window scroll instead. */
+body{margin:0;background:#0B1020;color:var(--cream);font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
+  display:grid;grid-template-columns:184px minmax(320px,1fr) 236px;height:100vh;overflow:auto}
+h2{font-size:10px;letter-spacing:.14em;text-transform:uppercase;opacity:.45;margin:16px 0 8px;font-weight:600}
+aside{padding:14px;overflow:auto;background:#0E1428;border-right:1px solid rgba(243,237,223,.1)}
+aside:last-child{border-right:0;border-left:1px solid rgba(243,237,223,.1)}
+.lib{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.lib button{aspect-ratio:1;background:#151d36;border:1px solid rgba(243,237,223,.14);border-radius:7px;
+  cursor:pointer;padding:3px;display:grid;place-items:center}
+.lib button[aria-pressed=true]{border-color:var(--coral);background:#22182a}
+.lib button svg{width:100%;height:100%;display:block}
+.lib .fixed{position:relative}
+.lib .fixed::after{content:'';position:absolute;top:3px;right:3px;width:5px;height:5px;border-radius:50%;
+  background:var(--coral)}
+main{position:relative;display:grid;place-items:center;overflow:hidden}
+#stage{touch-action:none;user-select:none;-webkit-user-select:none;max-width:100%;max-height:100%;box-shadow:0 20px 60px rgba(0,0,0,.45)}
+#stage.navy{background:#001D61}#stage.plum{background:#37002C}#stage.white{background:#fff}
+#stage.none{background:
+  linear-gradient(45deg,#1b2440 25%,transparent 25%,transparent 75%,#1b2440 75%),
+  linear-gradient(45deg,#1b2440 25%,#141a30 25%,#141a30 75%,#1b2440 75%);
+  background-size:16px 16px;background-position:0 0,8px 8px}
+label{display:grid;grid-template-columns:1fr auto;gap:2px 8px;align-items:center;margin-bottom:9px;opacity:.9}
+label b{font-weight:500;opacity:.55;font-variant-numeric:tabular-nums;font-size:11px}
+input[type=range]{grid-column:1/-1;width:100%;accent-color:var(--coral)}
+.row{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px}
+button.chip{background:rgba(243,237,223,.08);border:1px solid rgba(243,237,223,.2);color:var(--cream);
+  border-radius:999px;padding:5px 10px;font:inherit;font-size:11.5px;cursor:pointer}
+button.chip[aria-pressed=true]{background:var(--cream);color:#0B1020;border-color:var(--cream)}
+button.go{width:100%;margin-bottom:6px;background:var(--coral);color:#3a0f00;border:0;border-radius:7px;
+  padding:9px;font:inherit;font-weight:700;cursor:pointer}
+button.go.alt{background:rgba(243,237,223,.12);color:var(--cream)}
+textarea{width:100%;height:64px;background:#0B1020;color:var(--cream);border:1px solid rgba(243,237,223,.2);
+  border-radius:6px;font:11px/1.4 ui-monospace,Menlo,monospace;padding:6px;resize:vertical}
+.hint{font-size:11px;opacity:.5;line-height:1.45;margin:6px 0 0}
+.err{color:var(--coral);font-size:11.5px;margin-top:6px;min-height:1.2em}
+/* Controls must never wear the artwork's colour. .anchor used to be filled
+   with --coral, which on a coral ribbon is a coral dot on a coral line: the
+   handles were invisible and you ended up grabbing the tube instead. White
+   core, dark ring, non-scaling stroke so the ring stays crisp at every zoom. */
+.handle{fill:#0B1020;stroke:#fff;stroke-width:2;cursor:grab;vector-effect:non-scaling-stroke}
+.anchor{fill:#fff;stroke:#0B1020;stroke-width:2.5;cursor:grab;vector-effect:non-scaling-stroke}
+.anchor:hover,.handle:hover{fill:#ffd9a0}
+.leash{stroke:rgba(255,255,255,.55);stroke-width:1;fill:none;vector-effect:non-scaling-stroke}
+#edithint{position:absolute;left:12px;bottom:10px;font-size:11px;opacity:.45}
+</style>
+
+<aside>
+  <h2>Gestures</h2>
+  <div class="lib" id="libHand"></div>
+  <h2>Element <span style="opacity:.5">· fixed</span></h2>
+  <div class="lib" id="libSpine"></div>
+  <p class="hint">The four traced spines are 198 segments each — machine tracings, not editable curves. Place, scale, recolour; reshaping needs a refit.</p>
+</aside>
+
+<main>
+  <svg id="stage"></svg>
+  <div id="edithint"></div>
+</main>
+
+<aside>
+  <h2>Surface</h2>
+  <div class="row" id="hues"></div>
+  <label>Weight <b id="vW"></b><input type="range" id="w" min="6" max="120" value="38"></label>
+  <div class="row" id="wPresets"></div>
+  <label>Light <b id="vL"></b><input type="range" id="light" min="0" max="360" value="150"></label>
+  <label>Opacity <b id="vO"></b><input type="range" id="op" min="10" max="100" value="100"></label>
+  <label>Segments <b id="vS"></b><input type="range" id="segs" min="8" max="96" value="72"></label>
+
+  <h2>Frame</h2>
+  <label>Rotation <b id="vR"></b><input type="range" id="rot" min="-180" max="180" value="0"></label>
+  <label>Scale <b id="vZ"></b><input type="range" id="zoom" min="40" max="130" value="86"></label>
+  <div class="row" id="bgs"></div>
+
+  <h2>Export</h2>
+  <button class="go" id="svgShaded">SVG · shaded</button>
+  <button class="go alt" id="svgSpine">SVG · spine only</button>
+  <div class="row" id="pngs"></div>
+
+  <h2>Path</h2>
+  <textarea id="pathBox" spellcheck="false"></textarea>
+  <div class="row">
+    <button class="chip" id="applyPath">Apply</button>
+    <button class="chip" id="copyPath">Copy</button>
+    <button class="chip" id="resetPath">Reset</button>
+  </div>
+  <div class="err" id="err"></div>
+  <p class="hint">Paste a path from Figma to shade it. Copy takes the spine out for editing and back.</p>
+</aside>
+
+<script type="module">
+import { paintTube, TUBE } from '../system/tube.js';
+import { STROKES } from '../pages/home/data/strokes.js';
+
+const NS = 'http://www.w3.org/2000/svg';
+const el = (n, a = {}) => { const e = document.createElementNS(NS, n); for (const k in a) e.setAttribute(k, a[k]); return e; };
+const $ = id => document.getElementById(id);
+
+/* ---- shapes -------------------------------------------------------------
+   Read out of system/lines.js so there is exactly one definition of them. */
+const HAND_VB = '0 0 1000 800';
+const HAND_COUNT = 16, SPINE_COUNT = 4;   // one source; boot and self-test both read it
+async function loadShapes(){
+  const txt = await (await fetch('../system/lines.js')).text();
+  const block = txt.match(/const SHAPES = \{([\s\S]*?)\n  \};/);
+  if (!block) throw new Error('SHAPES block not found in system/lines.js');
+  const out = {};
+  for (const m of block[1].matchAll(/(\w+):\s*'([^']+)'/g)) out[m[1]] = { d: m[2], vb: HAND_VB, editable: true };
+  const n = Object.keys(out).length;
+  /* A total reformat fails the block match above. A PARTIAL one — a few entries
+     switched to double quotes — parses to a silent subset, which would quietly
+     drop gestures from the library. Assert the count at boot, not only under
+     ?selftest. */
+  if (n !== HAND_COUNT) throw new Error(`system/lines.js: parsed ${n} shapes, expected ${HAND_COUNT} — has the SHAPES block been reformatted?`);
+  for (const k of ['coral','green','violet','cyan'])
+    out['el-' + k] = { d: STROKES[k].d, vb: STROKES._viewBox, stops: STROKES[k].colors, editable: false };
+  return out;
+}
+
+/* ---- path model ---------------------------------------------------------
+   Normalised to explicit cubics so every handle exists to grab. S inherits
+   its first control point by reflection; an editor cannot offer a handle for
+   a point the path never states. */
+function parsePath(d){
+  /* A real parser, not a sniffer. The first version tokenised only M/C/S and
+     numbers, so any other command letter vanished from the stream while its
+     coordinates stayed — `C.. L40,0 C..` then fed L's numbers to the sticky C
+     and produced NaN anchors that passed the "looks like a path" check and got
+     rounded to 0,0. Figma emits L and Z constantly, so that was the paste path.
+
+     Everything is normalised to M and C, because the editor only knows how to
+     draw a cubic's handles:
+       L/H/V  a straight line IS a cubic with its handles on the chord
+       Q/T    exact quadratic -> cubic promotion (c = p + 2/3(ctrl - p))
+       S/T    reflect the previous control point about the current point
+       A      refused outright — arcs need a real conversion and Figma rarely
+              emits them; a clear refusal beats quietly wrong geometry. */
+  const TOK = /[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][+-]?\d+)?/g;
+  const t = String(d).match(TOK);
+  if (!t) return null;
+  const NEED = { M:2, L:2, H:1, V:1, C:6, S:4, Q:4, T:2, Z:0 };
+  const segs = [];
+  let i = 0, cmd = null, cur = null, startPt = null, prevC2 = null, prevQ = null;
+  const fin = v => Number.isFinite(v);
+  const num = () => parseFloat(t[i++]);
+  const cubic = (c1, c2, p) => {
+    if (![c1.x,c1.y,c2.x,c2.y,p.x,p.y].every(fin)) return false;
+    segs.push({ type:'C', c1, c2, p }); cur = p; return true;
+  };
+  const line = p => cubic({ x: cur.x + (p.x-cur.x)/3, y: cur.y + (p.y-cur.y)/3 },
+                          { x: cur.x + (p.x-cur.x)*2/3, y: cur.y + (p.y-cur.y)*2/3 }, p);
+  const quad = (q, p) => cubic({ x: cur.x + 2/3*(q.x-cur.x), y: cur.y + 2/3*(q.y-cur.y) },
+                               { x: p.x + 2/3*(q.x-p.x),     y: p.y + 2/3*(q.y-p.y) }, p);
+
+  while (i < t.length){
+    if (/[a-zA-Z]/.test(t[i])){
+      cmd = t[i++];
+      if (!(cmd.toUpperCase() in NEED)) return null;        // A/a and anything exotic
+    }
+    if (!cmd) return null;
+    const up = cmd.toUpperCase(), rel = cmd !== up, need = NEED[up];
+    /* Z CLOSES THE SUBPATH. Dropping it round-tripped a closed Figma shape as
+       an open one — the closing edge simply vanished from the canvas, the
+       spine export and the copied path. It is kept as a marker so toPath can
+       re-emit it, and `cur` returns to the subpath start, which is what any
+       following relative command is measured from. */
+    if (up === 'Z'){
+      segs.push({ type:'Z' });
+      if (startPt) cur = { ...startPt };
+      cmd = null; prevC2 = prevQ = null; continue;
+    }
+    /* Everything below reads `cur`. A path that opens with anything but a
+       moveto has none — that used to throw out of the click handler, and
+       applyPath was not guarded, so the button just looked dead. */
+    if (up !== 'M' && !cur) return null;
+    if (i + need > t.length) return null;                   // truncated: refuse
+    const A = v => rel && cur ? { x: cur.x + v.x, y: cur.y + v.y } : v;
+
+    if (up === 'M'){
+      const p = A({ x: num(), y: num() });
+      if (!fin(p.x) || !fin(p.y)) return null;
+      cur = p; startPt = { ...p }; segs.push({ type:'M', p:{ ...p } });
+      prevC2 = prevQ = null;
+      cmd = rel ? 'l' : 'L';                                // implicit repeat is lineto
+    } else if (up === 'L'){
+      if (!line(A({ x: num(), y: num() }))) return null; prevC2 = prevQ = null;
+    } else if (up === 'H'){
+      const x = num(); if (!line({ x: rel ? cur.x + x : x, y: cur.y })) return null; prevC2 = prevQ = null;
+    } else if (up === 'V'){
+      const y = num(); if (!line({ x: cur.x, y: rel ? cur.y + y : y })) return null; prevC2 = prevQ = null;
+    } else if (up === 'C'){
+      const c1 = A({ x: num(), y: num() }), c2 = A({ x: num(), y: num() }), p = A({ x: num(), y: num() });
+      if (!cubic(c1, c2, p)) return null; prevC2 = c2; prevQ = null;
+    } else if (up === 'S'){
+      const c2 = A({ x: num(), y: num() }), p = A({ x: num(), y: num() });
+      const c1 = prevC2 ? { x: 2*cur.x - prevC2.x, y: 2*cur.y - prevC2.y } : { ...cur };
+      if (!cubic(c1, c2, p)) return null; prevC2 = c2; prevQ = null;
+    } else if (up === 'Q'){
+      const q = A({ x: num(), y: num() }), p = A({ x: num(), y: num() });
+      if (!quad(q, p)) return null; prevQ = q; prevC2 = null;
+    } else if (up === 'T'){
+      const p = A({ x: num(), y: num() });
+      const q = prevQ ? { x: 2*cur.x - prevQ.x, y: 2*cur.y - prevQ.y } : { ...cur };
+      if (!quad(q, p)) return null; prevQ = q; prevC2 = null;
+    }
+  }
+  if (startPt && segs.length < 2) return null;
+  return segs.length && segs[0].type === 'M' ? segs : null;
+}
+/* Nothing non-finite should reach here — the parser refuses those paths now.
+   Kept as a last line of defence, but it throws rather than quietly writing 0
+   and snapping an anchor to the origin, which is how the desync stayed hidden. */
+/* The traced spines are M/Q/L polylines — 198 segments of machine tracing.
+   The editor could parse them now, but 198 sets of handles is not an editing
+   experience, so they stay fixed and render from their original string,
+   untouched. Editable shapes render from their live segments. */
+function currentD(){
+  const S = SHAPES[key];
+  return (S && S.editable && segs) ? toPath(segs) : (S ? S.d : '');
+}
+const toPath = segs => segs.map(s =>
+    s.type === 'Z' ? 'Z'
+  : s.type === 'M' ? `M${r(s.p.x)},${r(s.p.y)}`
+  : `C${r(s.c1.x)},${r(s.c1.y)} ${r(s.c2.x)},${r(s.c2.y)} ${r(s.p.x)},${r(s.p.y)}`).join(' ');
+const r = n => { if (!Number.isFinite(n)) throw new Error('non-finite coordinate'); return Math.round(n * 100) / 100; };
+
+/* ---- state -------------------------------------------------------------- */
+const HUES = ['coral','green','violet','cyan'];
+const BG = ['navy','plum','white','none'];
+let SHAPES = {}, key = null, segs = null, hue = 'coral', bg = 'navy', drag = null;
+/* While a handle is moving we draw the spine as ONE flat stroke instead of the
+   full shaded tube. paintTube builds 72 quads x ~11 nodes ~= 792 gradient-
+   bearing nodes; rebuilding that per pointer event (a trackpad fires ~120/s)
+   is what made dragging feel like mud. The lit version comes back on release. */
+let LITE = false;
+/* Handles hidden so the ribbon can be judged on its own. Exports never carried
+   them (standalone() rebuilds from paintTube rather than cloning the stage),
+   but you cannot judge a curve with nine dots sitting on it. */
+let preview = false;
+
+function ramp(){
+  const S = SHAPES[key];
+  return (S && S.stops) ? S.stops : STROKES[hue].colors;
+}
+function vb(){ return (SHAPES[key] || {}).vb || HAND_VB; }
+function vbNums(){ return vb().split(/[ ,]+/).map(Number); }
+
+/* ---- render ------------------------------------------------------------- */
+function render(){
+  const stage = $('stage'), [ , , W, H] = vbNums();
+  stage.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  stage.className.baseVal = bg;
+  const z = +$('zoom').value / 100;
+  stage.style.width = (W * z * 0.62) + 'px';
+  stage.style.height = (H * z * 0.62) + 'px';
+  stage.textContent = '';
+
+  const art = el('g');
+  art.setAttribute('transform', `rotate(${$('rot').value} ${W/2} ${H/2})`);
+  art.setAttribute('opacity', (+$('op').value / 100).toFixed(2));
+  stage.appendChild(art);
+
+  const host = el('svg', { viewBox: `0 0 ${W} ${H}`, width: W, height: H });
+  art.appendChild(host);
+  TUBE.segs = +$('segs').value;
+  /* A tool that fails silently wastes more of a designer's evening than one
+     that fails loudly. Anything the renderer throws lands in the error line. */
+  try {
+    if (LITE){
+      const r = ramp();
+      host.appendChild(el('path', { d: currentD(), fill: 'none',
+        stroke: r[r.length >> 1], 'stroke-width': +$('w').value,
+        'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+    } else {
+      paintTube(host, currentD(), +$('w').value, ramp(), (+$('light').value) * Math.PI / 180).reveal(1, 1);
+    }
+    $('err').textContent = '';
+    $('pathBox').value = currentD();
+  } catch (e){ $('err').textContent = 'render: ' + (e && e.message ? e.message : e); }
+
+  const editable = !!(SHAPES[key] && SHAPES[key].editable && segs);
+  if (editable && !preview) overlay(stage, W, H);
+  $('edithint').textContent = !editable ? 'traced spine — fixed shape'
+    : preview ? 'preview — click the canvas to edit'
+              : 'drag the dots to reshape · click off to preview';
+  for (const [i, v] of [['vW', $('w').value + 'u'], ['vL', $('light').value + '°'],
+                        ['vO', $('op').value + '%'], ['vS', $('segs').value],
+                        ['vR', $('rot').value + '°'], ['vZ', $('zoom').value + '%']]) $(i).textContent = v;
+}
+
+/* A dot drawn at R artboard units lands at about 7 CSS px on screen — a target
+   you have to aim at rather than grab. Widening the dot would clutter the
+   canvas, so the pickable area is widened instead: a transparent stroke is
+   still hit-tested (with pointer-events:all), which buys roughly a 22px target
+   for a 7px dot. Purely a hit-area change; nothing looks different. */
+function grab(c){
+  c.setAttribute('stroke', 'rgba(0,0,0,0)');
+  c.setAttribute('stroke-width', +c.getAttribute('r') * 1.6);
+  c.style.pointerEvents = 'all';
+  c.style.cursor = 'grab';
+  return c;
+}
+
+/* anchors + handles, drawn in artboard units so hit-testing is trivial */
+function overlay(stage, W, H){
+  const g = el('g'); stage.appendChild(g);
+  /* A radius in artboard units shrinks with the stage: at 86% scale W/90 came
+     out around 7 screen px, which is a target you aim at rather than grab, and
+     it got smaller every time you zoomed out. Size the dots in SCREEN pixels
+     instead and convert back through the live matrix, so a handle is the same
+     comfortable size at every zoom. */
+  const m = stage.getScreenCTM();
+  const k = m && Math.abs(m.a) > 1e-6 ? Math.abs(m.a) : (W ? 1 : 1);
+  const R = Math.min(W / 30, 10 / k);
+  /* Z carries no point, so the walk keeps its own idea of where the previous
+     anchor was rather than reading segs[i-1].p — which a close marker does
+     not have. Z is never given a handle: there is nothing there to drag. */
+  let prev = null;
+  segs.forEach((s, i) => {
+    if (s.type === 'Z') return;
+    if (s.type === 'C' && prev){
+      g.appendChild(el('path', { class: 'leash', d: `M${prev.x},${prev.y}L${s.c1.x},${s.c1.y}` }));
+      g.appendChild(el('path', { class: 'leash', d: `M${s.p.x},${s.p.y}L${s.c2.x},${s.c2.y}` }));
+      g.appendChild(grab(el('circle', { class: 'handle', cx: s.c1.x, cy: s.c1.y, r: R*0.7, 'data-i': i, 'data-k': 'c1' })));
+      g.appendChild(grab(el('circle', { class: 'handle', cx: s.c2.x, cy: s.c2.y, r: R*0.7, 'data-i': i, 'data-k': 'c2' })));
+    }
+    g.appendChild(grab(el('circle', { class: 'anchor', cx: s.p.x, cy: s.p.y, r: R, 'data-i': i, 'data-k': 'p' })));
+    prev = s.p;
+  });
+}
+
+/* ---- dragging ----------------------------------------------------------- */
+/* Screen px -> artboard units, through the SVG's OWN matrix. Mapping by
+   width/height ratios assumes the element box has the viewBox's aspect, and
+   it does not: #stage is clamped by max-width AND max-height independently,
+   so in a narrow window the SVG letterboxes via preserveAspectRatio while a
+   ratio map keeps stretching — and the handle drifts away from the cursor.
+   getScreenCTM is the transform the browser actually used.
+   Still returns null rather than a bad point: a dropped move is invisible, a
+   corrupted gesture is not. */
+function toArt(ev){
+  const st = $('stage'), m = st.getScreenCTM();
+  if (!m) return null;
+  let inv; try { inv = m.inverse(); } catch { return null; }
+  const pt = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(inv);
+  return Number.isFinite(pt.x) && Number.isFinite(pt.y) ? { x: pt.x, y: pt.y } : null;
+}
+$('stage').addEventListener('pointerdown', ev => {
+  const t = ev.target;
+  /* Anything that is not a handle is "outside": the canvas, the ground, the
+     ribbon itself. Pressing there toggles the dots away so the curve can be
+     read, and pressing again brings them back — the deselect/reselect idiom
+     rather than a mode the user has to remember they are in. Handled on
+     pointerdown, so a drag that happens to END on empty canvas cannot
+     accidentally toggle. */
+  if (!t.dataset || t.dataset.i === undefined){
+    if (SHAPES[key] && SHAPES[key].editable && segs){ preview = !preview; render(); }
+    return;
+  }
+  drag = { i: +t.dataset.i, k: t.dataset.k };
+  /* Capture on the STAGE, never on the dot. render() rebuilds the overlay from
+     scratch, so the dot you pressed is removed from the document on the very
+     first move — and removing a captured element implicitly releases the
+     capture, which fires lostpointercapture, which ends the drag. The gesture
+     died after exactly one step and then ignored you until you pressed again.
+     The stage outlives every render, so capturing there keeps the gesture. */
+  $('stage').setPointerCapture(ev.pointerId);
+  ev.preventDefault();
+});
+/* Moves the geometry for one pointer position. Split out of the listener so the
+   self-test can exercise the real mutation without waiting on a frame. */
+function applyDrag(ev){
+  if (!drag) return;
+  const p = toArt(ev);
+  if (!p) return;                                    // unmeasurable frame: ignore
+  /* picking a fixed spine mid-drag sets segs to null */
+  if (!segs || !segs[drag.i]) { drag = null; return; }
+  const s = segs[drag.i];
+  if (drag.k === 'p'){
+    const dx = p.x - s.p.x, dy = p.y - s.p.y;
+    s.p = p;
+    if (s.type === 'C'){ s.c2 = { x: s.c2.x + dx, y: s.c2.y + dy }; }   // carry its own handle
+    const nxt = segs[drag.i + 1];
+    if (nxt && nxt.type === 'C') nxt.c1 = { x: nxt.c1.x + dx, y: nxt.c1.y + dy };
+  } else s[drag.k] = p;
+  render();
+}
+
+/* Pointer events arrive faster than the screen refreshes, so rendering one per
+   event is work nobody sees. Keep only the newest position and draw at most
+   once per frame-length.
+   This is a clock throttle rather than requestAnimationFrame on purpose: rAF
+   does not fire in a tab that is not compositing, and a drag that silently
+   stops moving is exactly the bug being fixed. setTimeout always runs, so the
+   trailing move always lands. Coordinates are copied out — the event must not
+   be held past its handler. */
+const FRAME = 16;
+let pendingPt = null, lastDraw = 0, trail = 0;
+function flushDrag(){
+  trail = 0;
+  const pt = pendingPt; pendingPt = null;
+  if (!pt || !drag) return;
+  lastDraw = performance.now();
+  applyDrag(pt);
+}
+addEventListener('pointermove', ev => {
+  if (!drag) return;
+  pendingPt = { clientX: ev.clientX, clientY: ev.clientY };
+  LITE = true;
+  if (performance.now() - lastDraw >= FRAME){ if (trail){ clearTimeout(trail); } flushDrag(); }
+  else if (!trail) trail = setTimeout(flushDrag, FRAME);   // never drop the last move
+});
+function endDrag(){
+  if (!drag && !LITE) return;
+  if (trail){ clearTimeout(trail); trail = 0; }
+  if (pendingPt && drag) applyDrag(pendingPt);        // land the final position
+  drag = null; pendingPt = null;
+  if (LITE){ LITE = false; render(); }               // one lit repaint, on release
+}
+for (const ev of ['pointerup','pointercancel','lostpointercapture'])
+  addEventListener(ev, endDrag);
+
+/* Escape is one-way on purpose: it means "give me the handles back", so it is
+   safe to hit when you have lost track of the state. */
+addEventListener('keydown', ev => {
+  if (ev.key === 'Escape' && preview){ preview = false; render(); }
+});
+
+/* ---- export ------------------------------------------------------------- */
+/* Everything the user can click goes through this. A handler that throws used
+   to produce an unhandled rejection, no file and no message — the silent
+   failure the renderer's own guard exists to prevent. */
+async function guarded(what, fn){
+  try { await fn(); $('err').textContent = ''; }
+  catch (e){ $('err').textContent = what + ': ' + (e && e.message ? e.message : e); }
+}
+
+function standalone(shaded){
+  const [ , , W, H] = vbNums();
+  const svg = el('svg', { xmlns: NS, viewBox: `0 0 ${W} ${H}`, width: W, height: H });
+  if (bg !== 'none'){
+    const fill = bg === 'navy' ? '#001D61' : bg === 'plum' ? '#37002C' : '#ffffff';
+    svg.appendChild(el('rect', { x: 0, y: 0, width: W, height: H, fill }));
+  }
+  const g = el('g', { transform: `rotate(${$('rot').value} ${W/2} ${H/2})`,
+                      opacity: (+$('op').value / 100).toFixed(2) });
+  svg.appendChild(g);
+  if (shaded){
+    const host = el('svg', { viewBox: `0 0 ${W} ${H}`, width: W, height: H });
+    g.appendChild(host);
+    TUBE.segs = +$('segs').value;
+    paintTube(host, currentD(), +$('w').value, ramp(), (+$('light').value) * Math.PI / 180).reveal(1, 1);
+  } else {
+    /* the return leg: ONE path, no shading, the thing a designer can edit */
+    g.appendChild(el('path', { d: currentD(), fill: 'none', stroke: ramp()[Math.floor(ramp().length/2)],
+                               'stroke-width': $('w').value, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+  }
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
+}
+function save(name, blob){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+async function toPNG(scale){
+  const [ , , W, H] = vbNums();
+  const src = standalone(true);
+  const img = new Image();
+  await new Promise((ok, no) => {
+    img.onload = ok; img.onerror = () => no(new Error('svg would not rasterise'));
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(src);
+  });
+  const c = document.createElement('canvas');
+  c.width = Math.round(W * scale); c.height = Math.round(H * scale);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  return c;
+}
+
+/* ---- ui ----------------------------------------------------------------- */
+function chips(host, items, get, set){
+  $(host).textContent = '';
+  for (const it of items){
+    const b = document.createElement('button');
+    b.className = 'chip'; b.textContent = it.label; b.setAttribute('aria-pressed', get() === it.value);
+    b.onclick = () => { set(it.value); chips(host, items, get, set); render(); };
+    $(host).appendChild(b);
+  }
+}
+function thumb(k){
+  const S = SHAPES[k], [ , , W, H] = S.vb.split(/[ ,]+/).map(Number);
+  const s = el('svg', { viewBox: `0 0 ${W} ${H}` });
+  s.appendChild(el('path', { d: S.d, fill: 'none', stroke: 'rgba(243,237,223,.8)', 'stroke-width': W/22,
+                             'stroke-linecap': 'round' }));
+  return s;
+}
+function library(){
+  for (const [host, want] of [['libHand', true], ['libSpine', false]]){
+    $(host).textContent = '';
+    for (const k of Object.keys(SHAPES)){
+      if (SHAPES[k].editable !== want) continue;
+      const b = document.createElement('button');
+      if (!want) b.className = 'fixed';
+      b.setAttribute('aria-pressed', k === key); b.title = k;
+      b.appendChild(thumb(k));
+      b.onclick = () => { pick(k); };
+      $(host).appendChild(b);
+    }
+  }
+}
+function pick(k){
+  key = k;
+  segs = SHAPES[k].editable ? parsePath(SHAPES[k].d) : null;
+  if (SHAPES[k].editable && !segs){ $('err').textContent = 'could not parse ' + k; return; }
+  $('err').textContent = '';
+  library(); render();
+}
+
+for (const id of ['w','light','op','segs','rot','zoom']) $(id).addEventListener('input', render);
+$('svgShaded').onclick = () => guarded('svg', () => save(`line-${key}-shaded.svg`, new Blob([standalone(true)], {type:'image/svg+xml'})));
+$('svgSpine').onclick  = () => guarded('svg', () => save(`line-${key}-spine.svg`,  new Blob([standalone(false)], {type:'image/svg+xml'})));
+$('applyPath').onclick = () => guarded('path', () => {
+  const p = parsePath($('pathBox').value.trim());
+  if (!p) throw new Error('not a path I can read — must start with a moveto; arcs are not supported');
+  /* HAND_VB, not the current shape's: paste while a traced spine is selected
+     and the pasted artwork would inherit the spine's 1000x878.5 box and come
+     out mis-scaled. */
+  SHAPES['pasted'] = { d: $('pathBox').value.trim(), vb: HAND_VB, editable: true };
+  key = 'pasted'; segs = p; library(); render();
+});
+$('copyPath').onclick = () => guarded('copy', () => navigator.clipboard.writeText(currentD()));
+/* back to the library shape. The editor has no undo stack and does not need
+   one, but it does need a way out of a drag that went wrong. */
+$('resetPath').onclick = () => guarded('reset', () => { if (SHAPES[key]) pick(key); });
+
+/* ---- boot + self-test --------------------------------------------------- */
+const SELFTEST = /[?&]selftest/.test(location.search);
+loadShapes().then(async S => {
+  SHAPES = S;
+  chips('hues', HUES.map(h => ({label:h, value:h})), () => hue, v => hue = v);
+  chips('bgs',  BG.map(b => ({label:b, value:b})),   () => bg,  v => bg = v);
+  chips('wPresets', [{label:'68',value:38},{label:'56',value:31},{label:'44',value:25}],
+        () => +$('w').value, v => $('w').value = v);
+  chips('pngs', [1,2,3].map(n => ({label:n+'× PNG', value:n})), () => null,
+        n => guarded('png', async () => {
+          const c = await toPNG(n);
+          await new Promise((ok, no) => c.toBlob(b => {
+            if (!b) return no(new Error('canvas produced no image'));   // toBlob passes null on failure
+            save(`line-${key}-${n}x.png`, b); ok();
+          }));
+        }));
+  pick('loopA');
+  if (SELFTEST) window.__selftest = await selftest();
+}).catch(e => { $('err').textContent = String(e); window.__selftest = { fatal: String(e) }; });
+
+/* Every shape, every export, asserted. No screenshots, no eyeballing — the
+   results land on window.__selftest as JSON. */
+async function selftest(){
+  const pass = [], fail = [];
+  const check = (name, cond, detail) => (cond ? pass : fail).push(detail ? `${name}: ${detail}` : name);
+  const keys = Object.keys(SHAPES);
+  check('shape count', keys.length === HAND_COUNT + SPINE_COUNT,
+        `${keys.length} shapes (${HAND_COUNT} hand + ${SPINE_COUNT} spines expected)`);
+
+  for (const k of keys){
+    if (!SHAPES[k].editable){
+      /* a fixed spine is never parsed; it must reach the canvas verbatim */
+      pick(k);
+      check(`verbatim ${k}`, currentD() === SHAPES[k].d, 'spine passed through unmodified');
+      continue;
+    }
+    const p = parsePath(SHAPES[k].d);
+    check(`parse ${k}`, !!p && p.length > 1, p ? `${p.length} segs` : 'unparsed');
+    if (!p) continue;
+    /* round trip: re-parsing our own output must give the same geometry */
+    const again = parsePath(toPath(p));
+    check(`roundtrip ${k}`, !!again && again.length === p.length,
+          again ? `${p.length} -> ${again.length}` : 'failed');
+  }
+  const before = key;
+  for (const k of keys){
+    pick(k);
+    const svg = standalone(true);
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+    check(`svg parses ${k}`, !doc.querySelector('parsererror'));
+    check(`svg has gradients ${k}`, doc.querySelectorAll('linearGradient').length > 8,
+          doc.querySelectorAll('linearGradient').length + ' gradients');
+    const spine = new DOMParser().parseFromString(standalone(false), 'image/svg+xml');
+    const paths = [...spine.querySelectorAll('path')];
+    check(`spine is one path ${k}`, paths.length === 1, paths.length + ' paths');
+    check(`spine has geometry ${k}`, paths.length === 1 && (paths[0].getAttribute('d')||'').length > 20,
+          (paths[0] ? (paths[0].getAttribute('d')||'').length : 0) + ' chars');
+    check(`shaded has quads ${k}`, doc.querySelectorAll('g path').length > 8,
+          doc.querySelectorAll('g path').length + ' quads');
+  }
+  pick(before || 'loopA');
+
+  /* Regression cases from review. Each of these silently produced wrong
+     geometry before the parser was rewritten — a skipped command letter left
+     its coordinates in the stream for the previous command to eat. */
+  for (const [name, d, want] of [
+    ['L after C',        'M0,0 C10,0 20,0 30,0 L40,0 C50,0 60,0 70,0', 4],
+    ['exponent',         'M0,0 C1e-5,0 20,0 30,0', 2],
+    ['truncated',        'M0,0 C1,1 2,2 3', null],
+    ['arc refused',      'M0,0 A10,10 0 0 1 20,20', null],
+    ['Z then M',         'M0,0 L10,0 Z M20,20 L30,30', 5],   // the Z marker counts
+    ['implicit lineto',  'M0,0 10,10 20,0', 3],
+    ['relative',         'm10,10 c10,0 20,0 30,0', 2],
+    ['Q promotion',      'M0,0 Q50,100 100,0', 2],
+    ['H and V',          'M0,0 H50 V50', 3],
+    ['T after Q',        'M0,0 Q25,50 50,0 T100,0', 3],
+    ['no moveto refused','L50,50', null],
+    ['H first refused',  'H50', null],
+    ['closed square',    'M0,0 L10,0 L10,10 L0,10 Z', 5],
+  ]){
+    let got = null, threw = null;
+    try { const pp = parsePath(d); got = pp ? pp.length : null; if (pp) toPath(pp); }
+    catch (e){ threw = String(e.message || e); }
+    check(`parse: ${name}`, !threw && got === want, threw || `${got} segs, wanted ${want}`);
+  }
+  {
+    /* a closed shape must still be closed after a round trip */
+    const z = toPath(parsePath('M0,0 L10,0 L10,10 L0,10 Z'));
+    check('parse: Z survives round trip', /Z\s*$/.test(z), z.slice(-24));
+    const zz = parsePath(z);
+    check('parse: Z re-reads', !!zz && zz.filter(s => s.type === 'Z').length === 1);
+    /* and a relative command after Z is measured from the subpath start */
+    const rel = parsePath('M10,10 L20,20 Z m5,5');
+    const lastM = rel && rel.filter(s => s.type === 'M').pop();
+    check('parse: Z restores current point', !!lastM && lastM.p.x === 15 && lastM.p.y === 15,
+          lastM ? `${lastM.p.x},${lastM.p.y} (want 15,15)` : 'no M');
+  }
+  {
+    const pp = parsePath('M0,0 C10,0 20,0 30,0 L40,0 C50,0 60,0 70,0');
+    const third = pp[2].p, last = pp[3].p;
+    check('parse: L/C geometry', third.x === 40 && third.y === 0 && last.x === 70 && last.y === 0,
+          JSON.stringify({ third, last }));
+  }
+
+  /* the bug this guard exists for: a move event measured against a
+     zero-size stage used to write Infinity into the path */
+  {
+    pick('loopA');
+    const clean = currentD();
+    const st = $('stage'), real = st.getScreenCTM.bind(st);
+    /* An unrendered SVG has no screen CTM. That is the degenerate case now
+       that positions come from the matrix rather than a bounding rect — the
+       move must be dropped, not turned into a bad coordinate. */
+    st.getScreenCTM = () => null;
+    drag = { i: 1, k: 'p' };
+    applyDrag({ clientX: 50, clientY: 50 });
+    drag = null;
+    st.getScreenCTM = real;
+    check('null-CTM drag is ignored', currentD() === clean, 'path unchanged');
+    check('no non-finite in path', !/Infinity|NaN/.test(currentD()));
+  }
+
+  /* The drag throttle must never eat the LAST move: a gesture that stops one
+     position short leaves the dot somewhere the user did not put it. Driven
+     through a stubbed identity matrix so the assertion does not depend on the
+     page having a measurable viewport. */
+  {
+    pick('loopA');
+    const st = $('stage'), real = st.getScreenCTM.bind(st);
+    st.getScreenCTM = () => new DOMMatrix();          // identity: client px == artboard u
+    try {
+      const before = currentD();
+      drag = { i: 1, k: 'p' };
+      let draws = 0;
+      const realRender = render;
+      for (let i = 0; i < 50; i++)
+        dispatchEvent(new PointerEvent('pointermove',
+          { bubbles: true, clientX: 200 + i, clientY: 300 + i, pointerId: 7 }));
+      const moved = currentD() !== before;
+      endDrag();                                       // lands the final position
+      const at = segs[1] && segs[1].p;
+      check('throttled drag still moves the point', moved);
+      check('final move is not dropped', !!at && Math.round(at.x) === 249 && Math.round(at.y) === 349,
+            at ? Math.round(at.x) + ',' + Math.round(at.y) : 'none');
+      check('release returns to the lit tube', LITE === false);
+      check('drag leaves no non-finite', !/Infinity|NaN/.test(currentD()));
+    } finally { st.getScreenCTM = real; drag = null; LITE = false; }
+  }
+
+  /* The gesture must survive render(). Capture belongs on the stage: the dot
+     under the cursor is destroyed by the first repaint, and a captured element
+     leaving the document releases the capture and kills the drag. Asserting
+     WHERE the capture lands is the only cheap way to hold that invariant. */
+  {
+    pick('loopA');
+    const st = $('stage');
+    const a = st.querySelector('[data-i]');
+    let capturedOn = null;
+    const realStage = st.setPointerCapture.bind(st);
+    const realDot = a.setPointerCapture && a.setPointerCapture.bind(a);
+    st.setPointerCapture = () => { capturedOn = 'stage'; };
+    a.setPointerCapture = () => { capturedOn = 'dot'; };
+    try {
+      a.dispatchEvent(new PointerEvent('pointerdown',
+        { bubbles: true, clientX: 10, clientY: 10, pointerId: 11 }));
+      check('drag captures on the stage, not the dot', capturedOn === 'stage',
+            'captured on ' + capturedOn);
+      /* the invariant, not the implementation: a repaint mid-gesture must not
+         take the capture down with the dot it destroys */
+      render();
+      check('a repaint mid-gesture destroys the pressed dot',
+            !document.contains(a), 'overlay is rebuilt');
+      check('the capture survives that repaint',
+            $('stage').isConnected, 'capture lives on the stage');
+    } finally {
+      st.setPointerCapture = realStage;
+      if (realDot) a.setPointerCapture = realDot;
+      endDrag();
+    }
+  }
+
+  /* preview: clicking off the handles hides them, clicking again restores.
+     The export path is checked too — it must be identical either way, since
+     the dots are a viewing aid and have no business in a deliverable. */
+  {
+    pick('loopA');
+    preview = false; render();
+    const withDots = $('stage').querySelectorAll('[data-i]').length;
+    const exportBefore = standalone(true).outerHTML;
+    const canvas = $('stage');
+    canvas.dispatchEvent(new PointerEvent('pointerdown',
+      { bubbles: true, clientX: 2, clientY: 2, pointerId: 21 }));
+    const hidden = $('stage').querySelectorAll('[data-i]').length;
+    check('clicking off the handles hides them', withDots > 0 && hidden === 0,
+          withDots + ' -> ' + hidden);
+    check('the ribbon is still drawn in preview',
+          $('stage').querySelectorAll('path').length > 0);
+    check('preview does not change the export',
+          standalone(true).outerHTML === exportBefore);
+    canvas.dispatchEvent(new PointerEvent('pointerdown',
+      { bubbles: true, clientX: 2, clientY: 2, pointerId: 22 }));
+    check('clicking again brings the handles back',
+          $('stage').querySelectorAll('[data-i]').length === withDots);
+    preview = true; render();
+    dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    check('Escape returns to editing', preview === false &&
+          $('stage').querySelectorAll('[data-i]').length === withDots);
+    /* a fixed spine has nothing to hide, and must not get stuck in a mode */
+    pick(Object.keys(SHAPES).find(k => !SHAPES[k].editable));
+    preview = false;
+    $('stage').dispatchEvent(new PointerEvent('pointerdown',
+      { bubbles: true, clientX: 2, clientY: 2, pointerId: 23 }));
+    check('a fixed spine cannot enter preview', preview === false);
+    pick('loopA'); preview = false; render();
+  }
+
+  /* hit area: the dot stays small, the grabbable ring around it does not */
+  {
+    pick('loopA');
+    const a = $('stage').querySelector('[data-i]');
+    check('anchors are grabbable past their radius',
+          !!a && +a.getAttribute('stroke-width') > +a.getAttribute('r'),
+          a ? a.getAttribute('stroke-width') + ' vs r ' + a.getAttribute('r') : 'no anchor');
+    check('anchor hit area is opt-in only', !!a && a.style.pointerEvents === 'all');
+  }
+
+  for (const n of [1, 2, 3]){
+    try {
+      const c = await toPNG(n);
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      let lit = 0; for (let i = 3; i < d.length; i += 4000) if (d[i] > 8) lit++;
+      check(`png ${n}x`, lit > 0, `${c.width}x${c.height}, ${lit} sampled opaque px`);
+    } catch (e){ check(`png ${n}x`, false, String(e)); }
+  }
+  return { ok: fail.length === 0, passed: pass.length, failed: fail.length, fail, pass };
+}
+</script>
