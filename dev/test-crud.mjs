@@ -8,7 +8,16 @@
    was almost every ribbon. A fake API catches that with no Figma round trip.
 
    Run:  node tools/figma-plugin/test-crud.mjs                                */
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+
+/* This file is used from two layouts: beside code.js in the site repo, and in
+   dev/ next to a plugin/ folder in the standalone plugin repo. Resolving both
+   keeps sync.sh a straight copy — the alternative was patching the copy after
+   every sync, which meant the next sync silently undid it. */
+const CODE = ['../plugin/code.js', './code.js']
+  .map(p => new URL(p, import.meta.url))
+  .find(u => existsSync(u));
+if (!CODE) throw new Error('cannot find code.js beside this file or in ../plugin/');
 
 let uid = 0;
 
@@ -101,7 +110,7 @@ globalThis.figma = {
 
 const ABS = n => { const t = n.absoluteTransform; return { x: t[0][2], y: t[1][2] }; };
 
-new Function('figma', '__html__', readFileSync(new URL('../plugin/code.js', import.meta.url), 'utf8'))(globalThis.figma, '<html/>');
+new Function('figma', '__html__', readFileSync(CODE, 'utf8'))(globalThis.figma, '<html/>');
 const send = async msg => { await globalThis.figma.ui.onmessage(msg); };
 
 const SPINE_D = 'M 0 0 L 10 10';

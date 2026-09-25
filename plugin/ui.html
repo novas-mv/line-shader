@@ -508,12 +508,10 @@ function draw(){
   const prev = $('prev');
   while (prev.firstChild) prev.removeChild(prev.firstChild);
   $('go').disabled = !state.d;
-  /* Edit spine is a vector-mode affordance. It does work on a flattened
-     ribbon — the curve is carried inside it — but reshaping something you
-     asked to be a picture is a confusing offer, so the button only exists
-     once Vectors is on. Hidden rather than disabled: a permanently greyed
-     button is just a question the designer keeps re-asking. */
-  $('edit').hidden = !$('vec').checked;
+  /* Shown in both modes. A flattened ribbon carries its curve, so reshaping
+     one works; it was hidden while the button was merely broken, and keeping
+     it hidden after the fix would have buried the feature, since flatten is
+     the default and the toggle lives behind Advanced. */
   $('edit').disabled = !state.exists;
   $('del').disabled = !state.exists;
   if (!state.d){ $('go').textContent = 'Select a path'; return; }

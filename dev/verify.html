@@ -25,8 +25,19 @@ const D = 'M120,400 C240,140 470,660 640,330 S900,120 980,420';
 /* cache-bust: without this the harness happily grades a STALE copy of the
    plugin and reports failures that were fixed minutes ago */
 const bust = '?t=' + Date.now();
-const codeSrc = await (await fetch('../plugin/code.js' + bust, { cache: 'no-store' })).text();
-const uiSrc   = await (await fetch('../plugin/ui.html' + bust, { cache: 'no-store' })).text();
+/* Served from two layouts — beside the plugin in the site repo, and from dev/
+   next to plugin/ in the standalone repo. Try both so sync.sh stays a copy. */
+async function grab(name){
+  for (const base of ['../plugin/', './']){
+    try {
+      const r = await fetch(base + name + bust, { cache: 'no-store' });
+      if (r.ok) return await r.text();
+    } catch { /* try the next */ }
+  }
+  throw new Error('cannot find ' + name + ' beside this file or in ../plugin/');
+}
+const codeSrc = await grab('code.js');
+const uiSrc   = await grab('ui.html');
 
 /* the hand-built machinery must be GONE, not merely unused */
 check('Figma does the import', /createNodeFromSvg\(/.test(codeSrc));
