@@ -1,4 +1,4 @@
-/* VARA — line shader (Figma plugin, main thread)
+/* Line Shader (Figma plugin, main thread)
    ---------------------------------------------------------------------------
    The designer draws a spine with Figma's pen tool. This turns that spine into
    the site's shaded ribbon as NATIVE Figma vectors, so it stays editable and
@@ -18,9 +18,9 @@
    child, so the ribbon is one self-contained thing you can move, re-shade,
    reshape, or throw away. */
 
-const GROUP = 'vara-ribbon';
-const SPINE = 'vara-spine';
-const DATA  = 'vara-spine';          // settings stashed on the ribbon
+const GROUP = 'ribbon';
+const SPINE = 'spine';
+const DATA  = 'line-shader';          // settings stashed on the ribbon
 
 figma.showUI(__html__, { width: 300, height: 470 });
 
@@ -168,7 +168,7 @@ async function flatten(node, png, size){
   /* FIT, not FILL: FILL crops to the rectangle's aspect and trims the ends off
      a ribbon whose box is not the image's shape. */
   r.fills = [{ type: 'IMAGE', imageHash: img.hash, scaleMode: 'FIT' }];
-  r.name = 'vara-raster';
+  r.name = 'raster';
   const parent = node.parent || figma.currentPage;
   parent.appendChild(r);
   moveAbs(r, art.x, art.y);

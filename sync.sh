@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Rebuild this repo's plugin from the site repo, which is the source of truth.
-#   ./sync.sh ../vara-expo-2026
+#   ./sync.sh ../site-repo
 set -euo pipefail
-SITE="${1:?usage: ./sync.sh <path to vara-expo-2026 checkout>}"
+SITE="${1:?usage: ./sync.sh <path to the site checkout>}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-[ -f "$SITE/tools/gen-figma-plugin.py" ] || { echo "not a vara-expo-2026 checkout: $SITE" >&2; exit 1; }
+[ -f "$SITE/tools/gen-figma-plugin.py" ] || { echo "not a site checkout: $SITE" >&2; exit 1; }
 
 python3 "$SITE/tools/gen-figma-plugin.py"
 python3 "$SITE/tools/gen-figma-plugin.py" --check

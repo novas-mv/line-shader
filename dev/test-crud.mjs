@@ -124,7 +124,7 @@ const apply = flat => ({ type: 'svg', svg: '<svg/>', offset: { x: 5, y: 7 },
 const fails = [];
 let n = 0;
 const ok = (name, cond, detail = '') => { n++; if (!cond) fails.push(name + (detail ? ' — ' + detail : '')); };
-const spineOf = x => x && x.children && x.children.find(c => c.name === 'vara-spine');
+const spineOf = x => x && x.children && x.children.find(c => c.name === 'spine');
 
 const drawn = figma.createVector();
 drawn.vectorPaths = [{ data: SPINE_D }];
@@ -135,19 +135,19 @@ ok('flatten produces a container, not a bare rectangle', ribbon.type === 'GROUP'
 ok('the flattened ribbon keeps its spine', !!spineOf(ribbon));
 ok('that spine is hidden and locked', !!spineOf(ribbon) && !spineOf(ribbon).visible && spineOf(ribbon).locked);
 ok('it holds a raster', ribbon.children.some(c => c.type === 'RECTANGLE'));
-ok('settings survive the flatten', (JSON.parse(ribbon.getPluginData('vara-spine') || '{}')).hue === 'coral');
+ok('settings survive the flatten', (JSON.parse(ribbon.getPluginData('line-shader') || '{}')).hue === 'coral');
 
 page.selection = [ribbon];
 await send({ type: 'edit' });
 const edited = page.selection[0];
-ok('edit spine selects the curve', !!edited && edited.name === 'vara-spine', edited && edited.type);
+ok('edit spine selects the curve', !!edited && edited.name === 'spine', edited && edited.type);
 ok('edit spine unhides and unlocks it', !!edited && edited.visible && !edited.locked);
 ok('edit spine raised no error', !notices.some(x => x.error), JSON.stringify(notices.filter(x => x.error)));
 
 page.selection = [ribbon];
 await send(apply(true));
 const updated = page.selection[0];
-ok('update returns a ribbon', !!updated && updated.getPluginData('vara-spine') !== '');
+ok('update returns a ribbon', !!updated && updated.getPluginData('line-shader') !== '');
 ok('update keeps the spine', !!spineOf(updated));
 ok('the previous ribbon is gone', ribbon._removed || ribbon === updated);
 
@@ -253,7 +253,7 @@ ok('delete removed the ribbon', vec._removed);
 }
 
 const legacy = figma.createRectangle();
-legacy.setPluginData('vara-spine', JSON.stringify({ ...base, offX: 5, offY: 7 }));
+legacy.setPluginData('line-shader', JSON.stringify({ ...base, offX: 5, offY: 7 }));
 page.selection = [legacy];
 await send({ type: 'edit' });
 const rebuilt = page.selection[0];

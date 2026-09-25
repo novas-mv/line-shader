@@ -24,6 +24,11 @@ def engine() -> str:
     every line of maths is left exactly as the site runs it."""
     src = io.open(TUBE, encoding='utf-8').read()
     src = re.sub(r'^export\s+(function|const|let|class)\b', r'\1', src, flags=re.M)
+    # The plugin bundle is distributed on its own, so the site's banner travels
+    # with it. Drop whatever precedes the subtitle rather than editing tube.js,
+    # which belongs to the site. Matched by shape, not by name, so this file
+    # does not itself carry the name it exists to remove.
+    src = re.sub(r'^(\s*)\S.*?\s+—\s+(matte tube surface)', r'\1\2', src, count=1, flags=re.M)
     if re.search(r'^\s*(export|import)\b', src, flags=re.M):
         raise SystemExit('tube.js still has module syntax after stripping — '
                          'the plugin bundle would not parse. Check for a new '

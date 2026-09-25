@@ -1,6 +1,6 @@
-# VARA — line shader
+# Line Shader
 
-A Figma plugin that turns a pen-tool path into the VARA ribbon, using the same
+A Figma plugin that turns a pen-tool path into a shaded 3D-looking ribbon, using the same
 shading code the website runs.
 
 **Designers: you only need the [Install](#install) section.**
@@ -16,7 +16,7 @@ You need the plugin files on your Mac once.
 2. In Figma: **Plugins → Development → Import plugin from manifest…**
 3. Choose **`plugin/manifest.json`** from the folder you unzipped.
 
-It now appears under **Plugins → Development → VARA — line shader**. You only
+It now appears under **Plugins → Development → Line Shader**. You only
 do this once; it stays until you remove it.
 
 > Keep the unzipped folder somewhere permanent (not Downloads). Figma reads the
@@ -68,14 +68,14 @@ ramp averages those outliers back toward their neighbours.
 ## For whoever maintains this
 
 `plugin/ui.html` is **generated**. The source of truth is the main site repo
-(`vara-expo-2026`): `tools/figma-plugin/ui.template.html` plus `system/tube.js`
+(the site repo): `tools/figma-plugin/ui.template.html` plus `system/tube.js`
 plus the ramps in `pages/home/data/strokes.js`. That is deliberate — the plugin
 inlines the site's real shading code so the two cannot drift.
 
 To update this repo after changing the site:
 
 ```bash
-./sync.sh ../vara-expo-2026     # path to your site checkout
+./sync.sh ../site-repo     # path to your site checkout
 ```
 
 It regenerates `ui.html` in the site repo, copies the built plugin here, and
