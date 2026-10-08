@@ -64,9 +64,9 @@ function currentSpine(){
   if (ribbon){
     const s = settingsOf(ribbon);
     const spine = spineIn(ribbon);
-    /* A scaled ribbon carries a scaled spine. Shade the curve at its natural
-       size and scale the result, or the tube width would not scale with it. */
-    const d = (spine && scalePath(pathOf(spine), 1 / scaleOf(ribbon))) || s.d;
+    /* Shade the curve at its natural size and scale the result, or the tube
+       width would not scale with the ribbon. */
+    const d = naturalOf(ribbon).d;
     if (!d) return { err: 'That ribbon has lost its spine. Delete and redraw it.' };
     const anchor = spine || ribbon;
     return { d, settings: s, exists: true, x: anchor.x, y: anchor.y };
@@ -133,9 +133,48 @@ function scaleOf(ribbon){
 }
 /* Figma's vectorPaths are absolute commands with plain numbers, so scaling the
    path about the node's own origin is scaling every number. */
+const NUM = /-?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/gi;
 function scalePath(d, k){
   if (!d || k === 1) return d;
-  return d.replace(/-?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/gi, n => String(+n * k));
+  return d.replace(NUM, n => String(+n * k));
+}
+/* k when `a` is exactly `b` scaled by k, null when it is a different curve.
+   The settings keep the curve as it was last shaded (`d`), so this tells a
+   scaled spine from a reshaped one without trusting any stored size. */
+function ratioOf(a, b){
+  if (!a || !b) return null;
+  const strip = s => s.replace(NUM, '#').replace(/[\s,]+/g, '');
+  if (strip(a) !== strip(b)) return null;
+  const na = a.match(NUM).map(Number), nb = b.match(NUM).map(Number);
+  let k = null;
+  for (let i = 0; i < nb.length; i++){
+    if (Math.abs(nb[i]) < 1e-6){ if (Math.abs(na[i]) > 1e-3) return null; continue; }
+    const r = na[i] / nb[i];
+    if (k === null) k = r;
+    else if (Math.abs(r - k) > 1e-3 * Math.abs(k) + 1e-4) return null;
+  }
+  return k > 0 ? k : (k === null ? 1 : null);
+}
+/* The ribbon's curve at natural size (`d`), and how much the ribbon is scaled
+   (`S`). Two witnesses: the artwork against the size it was built at (`ref`,
+   absent on ribbons from older builds), and the spine against the curve it
+   was shaded from. The spine does not always scale with the artwork — a
+   frame's resize handles scale the SVG's vectors but leave a vector with
+   default constraints alone — so neither is trusted on its own. */
+function naturalOf(ribbon){
+  const s = settingsOf(ribbon);
+  const now = pathOf(spineIn(ribbon));
+  const art = s.ref > 0 && sizeOf(artOf(ribbon)) > 0 ? scaleOf(ribbon) : null;
+  if (!now) return { d: s.d, S: art || 1, same: true };
+  const k = ratioOf(now, s.d);
+  if (k) return { d: s.d, S: art || k, same: true };
+  const S = art || 1;                                // reshaped in Edit mode
+  return { d: scalePath(now, 1 / S), S, same: false };
+}
+/* Top-left of the artwork as the designer sees it — the frame for a vector
+   ribbon, the image for a flattened one. */
+function artBoxOf(ribbon){
+  return ribbon.type === 'FRAME' ? ribbon : artOf(ribbon);
 }
 
 /* `at` is the layer slot to take, so a rebuilt ribbon REPLACES the old one in
@@ -166,12 +205,25 @@ function create(spineNode, svg, offset, settings){
 /* In place: same parent, same layer slot, same position, same scale, and the
    name and opacity the designer gave it. Only the shading changes. */
 function update(ribbon, svg, offset, settings){
-  const anchor = anchorOf(ribbon);
+  const n = naturalOf(ribbon);
   const spine = spineIn(ribbon);
-  const scale = scaleOf(ribbon);
+  const box = artBoxOf(ribbon);
+  /* Unless the curve was reshaped, the artwork is where the designer put the
+     ribbon, so the new artwork goes exactly there and the spine follows it. */
+  let anchor = anchorOf(ribbon);
+  if (n.same && box){
+    const a = absOf(box);
+    anchor = { x: a.x - offset.x * n.S, y: a.y - offset.y * n.S };
+  }
+  /* Bring the spine to the same scale as the artwork, so Edit spine hands
+     back a curve that matches what is on the canvas. */
+  if (spine && n.same && n.d && ratioOf(pathOf(spine), n.d) !== n.S){
+    const wr = spine.vectorPaths[0] ? spine.vectorPaths[0].windingRule : 'NONE';
+    spine.vectorPaths = [{ windingRule: wr || 'NONE', data: scalePath(n.d, n.S) }];
+  }
   const parent = ribbon.parent || figma.currentPage;
   const frame = build(parent, svg, anchor, offset, spine, settings,
-                      scale, parent.children.indexOf(ribbon));
+                      n.S, parent.children.indexOf(ribbon));
   keepLook(ribbon, frame);
   ribbon.remove();
   return frame;

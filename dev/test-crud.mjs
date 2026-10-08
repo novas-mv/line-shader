@@ -133,9 +133,9 @@ const SPINE_D = 'M 0 0 L 10 10';
 const base = { d: SPINE_D, hue: 'coral', w: 68, light: 140, segs: 96,
                stops: 13, con: 42, sheen: 18, sss: 20, wrap: 66, smooth: 3 };
 const png = new Uint8Array([1,2,3,4]);
-const apply = flat => ({ type: 'svg', svg: '<svg/>', offset: { x: 5, y: 7 },
+const apply = (flat, d = SPINE_D) => ({ type: 'svg', svg: '<svg/>', offset: { x: 5, y: 7 },
                          png, size: { w: 300, h: 200 },
-                         settings: { ...base, flatten: flat } });
+                         settings: { ...base, d, flatten: flat } });
 
 const fails = [];
 let n = 0;
@@ -283,7 +283,7 @@ for (const flat of [false, true]){
   const mode = flat ? 'flattened' : 'vector';
 
   page.selection = [curve];
-  await send(apply(flat));
+  await send(apply(flat, 'M 0 0 L 40 20'));
   const rib = page.selection[0];
   ok(mode + ': a new ribbon takes the curve\'s layer slot', board.children.indexOf(rib) === 1,
      board.children.map(c => c.type).join(','));
@@ -299,7 +299,7 @@ for (const flat of [false, true]){
   ok(mode + ': a scaled ribbon is re-shaded from its natural-size curve',
      lastSpine && lastSpine.d === 'M 0 0 L 40 20', lastSpine && lastSpine.d);
 
-  await send(apply(flat));
+  await send(apply(flat, 'M 0 0 L 40 20'));
   const up = page.selection[0];
   ok(mode + ': update removes the old ribbon (no duplicate)', rib._removed && board.children.length === count,
      `${count} -> ${board.children.length}`);
@@ -315,11 +315,48 @@ for (const flat of [false, true]){
   ok(mode + ': update keeps the name and opacity', up.name === 'Hero ribbon' && up.opacity === .6, up.name);
 
   page.selection = [up];
-  await send(apply(flat));
+  await send(apply(flat, 'M 0 0 L 40 20'));
   const again = page.selection[0];
   const art2 = again.children.find(c => c.name !== 'spine');
   ok(mode + ': a second update does not compound the scale',
      near(Math.max(art2.width, art2.height), natural * 2), String(Math.max(art2.width, art2.height)));
+}
+
+/* Ribbons made before scale was tracked have no `ref`, and a frame's resize
+   handles scale the artwork but not the hidden spine. Both must still keep
+   the size the designer sees. */
+for (const how of ['older build, scaled with K', 'resize handles, spine left alone']){
+  const near = (a, b, t = 0.51) => Math.abs(a - b) <= t;
+  const curve = figma.createVector();
+  curve.vectorPaths = [{ data: 'M 0 0 L 40 20' }];
+  curve.x = 700; curve.y = 500;
+  page.selection = [curve];
+  await send(apply(false, 'M 0 0 L 40 20'));
+  const rib = page.selection[0];
+  const art0 = rib.children.find(c => c.name !== 'spine');
+  const natural = Math.max(art0.width, art0.height);
+  if (how.startsWith('older')){
+    const d = JSON.parse(rib.getPluginData('line-shader')); delete d.ref;
+    rib.setPluginData('line-shader', JSON.stringify(d));
+    rib.rescale(3);
+  } else {
+    const sp = spineOf(rib); const keep = { ...sp, vectorPaths: sp.vectorPaths, w: sp.width, h: sp.height, x: sp._x, y: sp._y };
+    rib.rescale(3);
+    sp.vectorPaths = keep.vectorPaths; sp.width = keep.w; sp.height = keep.h; sp._x = keep.x; sp._y = keep.y;
+  }
+  const boxBefore = ABS(rib);
+  page.selection = [rib];
+  await globalThis.figma.ui.onmessage({ type: 'need-spine' });
+  ok(how + ': shades the natural curve', lastSpine && lastSpine.d === 'M 0 0 L 40 20', lastSpine && lastSpine.d);
+  await send(apply(false, 'M 0 0 L 40 20'));
+  const up = page.selection[0];
+  const art = up.children.find(c => c.name !== 'spine');
+  ok(how + ': keeps the scale', near(Math.max(art.width, art.height), natural * 3),
+     `${Math.max(art.width, art.height)} vs ${natural * 3}`);
+  ok(how + ': keeps the artwork where it was', near(ABS(up).x, boxBefore.x) && near(ABS(up).y, boxBefore.y),
+     `${ABS(up).x},${ABS(up).y} vs ${boxBefore.x},${boxBefore.y}`);
+  ok(how + ': the spine is scaled to match', spineOf(up).vectorPaths[0].data === 'M 0 0 L 120 60',
+     spineOf(up).vectorPaths[0].data);
 }
 
 const legacy = figma.createRectangle();
