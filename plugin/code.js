@@ -64,7 +64,9 @@ function currentSpine(){
   if (ribbon){
     const s = settingsOf(ribbon);
     const spine = spineIn(ribbon);
-    const d = pathOf(spine) || s.d;
+    /* A scaled ribbon carries a scaled spine. Shade the curve at its natural
+       size and scale the result, or the tube width would not scale with it. */
+    const d = (spine && scalePath(pathOf(spine), 1 / scaleOf(ribbon))) || s.d;
     if (!d) return { err: 'That ribbon has lost its spine. Delete and redraw it.' };
     const anchor = spine || ribbon;
     return { d, settings: s, exists: true, x: anchor.x, y: anchor.y };
@@ -116,30 +118,68 @@ function anchorOf(ribbon){
   return { x: a.x - (prev.offX || 0), y: a.y - (prev.offY || 0) };
 }
 
-function build(parent, svg, anchor, offset, spine, settings){
+/* ---- scale ---------------------------------------------------------------
+   Designers scale ribbons (K, or dragging a group's handles). Update has to
+   keep that, so the ribbon records how big its artwork was when built (`ref`)
+   and compares it to how big that artwork is now. The artwork, not the spine:
+   reshaping the spine in Edit mode changes its size without scaling anything. */
+function artOf(ribbon){
+  return ribbon && ribbon.children ? ribbon.children.find(c => c.name !== SPINE) || null : null;
+}
+function sizeOf(node){ return node ? Math.max(node.width, node.height) : 0; }
+function scaleOf(ribbon){
+  const ref = settingsOf(ribbon).ref, now = sizeOf(artOf(ribbon));
+  return ref > 0 && now > 0 ? now / ref : 1;
+}
+/* Figma's vectorPaths are absolute commands with plain numbers, so scaling the
+   path about the node's own origin is scaling every number. */
+function scalePath(d, k){
+  if (!d || k === 1) return d;
+  return d.replace(/-?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/gi, n => String(+n * k));
+}
+
+/* `at` is the layer slot to take, so a rebuilt ribbon REPLACES the old one in
+   the layer stack instead of landing on top of everything as a new layer. */
+function build(parent, svg, anchor, offset, spine, settings, scale = 1, at = -1){
   const frame = importSvg(svg);
-  parent.appendChild(frame);
-  moveAbs(frame, anchor.x + offset.x, anchor.y + offset.y);
+  if (at >= 0) parent.insertChild(Math.min(at, parent.children.length), frame);
+  else parent.appendChild(frame);
+  const ref = sizeOf(artOf(frame));                 // natural size, before scaling
+  const ax = anchor.x + offset.x * scale, ay = anchor.y + offset.y * scale;
+  if (scale !== 1) frame.rescale(scale);            // before the spine goes in: it is already scaled
+  moveAbs(frame, ax, ay);                           // after, so the scale's own anchor cannot shift it
   if (spine){
     frame.appendChild(spine);
     moveAbs(spine, anchor.x, anchor.y);      // put it back where it was drawn
     spine.name = SPINE; spine.visible = false; spine.locked = true;
   }
-  frame.setPluginData(DATA, JSON.stringify({ ...settings, offX: offset.x, offY: offset.y }));
+  frame.setPluginData(DATA, JSON.stringify({ ...settings, offX: offset.x * scale, offY: offset.y * scale, ref }));
   return frame;
 }
 
 function create(spineNode, svg, offset, settings){
-  return build(spineNode.parent || figma.currentPage, svg,
-               absOf(spineNode), offset, spineNode, settings);
+  const parent = spineNode.parent || figma.currentPage;
+  return build(parent, svg, absOf(spineNode), offset, spineNode, settings,
+               1, parent.children.indexOf(spineNode));
 }
 
+/* In place: same parent, same layer slot, same position, same scale, and the
+   name and opacity the designer gave it. Only the shading changes. */
 function update(ribbon, svg, offset, settings){
   const anchor = anchorOf(ribbon);
   const spine = spineIn(ribbon);
-  const frame = build(ribbon.parent || figma.currentPage, svg, anchor, offset, spine, settings);
+  const scale = scaleOf(ribbon);
+  const parent = ribbon.parent || figma.currentPage;
+  const frame = build(parent, svg, anchor, offset, spine, settings,
+                      scale, parent.children.indexOf(ribbon));
+  keepLook(ribbon, frame);
   ribbon.remove();
   return frame;
+}
+
+function keepLook(from, to){
+  if (from.name && !from.name.startsWith(GROUP)) to.name = from.name;
+  if (typeof from.opacity === 'number') to.opacity = from.opacity;
 }
 
 /* ---- flatten ------------------------------------------------------------
@@ -162,14 +202,18 @@ async function flatten(node, png, size){
   const img = figma.createImage(bytes);
   const art = absOf(node);                      // where the artwork sits NOW
   const spineAt = spineIn(node) ? absOf(spineIn(node)) : null;
+  /* The frame may have been scaled to match a scaled ribbon; size is natural. */
+  const k = settingsOf(node).ref > 0 ? scaleOf(node) : 1;
+  const nat = { w: Math.max(size && size.w ? size.w : node.width / k, 1),
+                h: Math.max(size && size.h ? size.h : node.height / k, 1) };
   const r = figma.createRectangle();
-  r.resize(Math.max(size && size.w ? size.w : node.width, 1),
-           Math.max(size && size.h ? size.h : node.height, 1));
+  r.resize(nat.w * k, nat.h * k);
   /* FIT, not FILL: FILL crops to the rectangle's aspect and trims the ends off
      a ribbon whose box is not the image's shape. */
   r.fills = [{ type: 'IMAGE', imageHash: img.hash, scaleMode: 'FIT' }];
   r.name = 'raster';
   const parent = node.parent || figma.currentPage;
+  const at = parent.children.indexOf(node);         // take the frame's layer slot
   parent.appendChild(r);
   moveAbs(r, art.x, art.y);
 
@@ -181,14 +225,16 @@ async function flatten(node, png, size){
      structurally identical to a vector one, so edit, update and delete all
      keep working on it. The spine must move out BEFORE the frame is removed. */
   const spine = spineIn(node);
-  const g = figma.group([r], parent);
+  const g = figma.group([r], parent, at);
   g.name = GROUP + ' (flattened)';
+  keepLook(node, g);
   if (spine){
     g.appendChild(spine);
     if (spineAt) moveAbs(spine, spineAt.x, spineAt.y);   // reparenting must not move it
     spine.name = SPINE; spine.visible = false; spine.locked = true;
   }
-  g.setPluginData(DATA, node.getPluginData(DATA));
+  /* The raster is the artwork now, so it is what later scaling is measured on. */
+  g.setPluginData(DATA, JSON.stringify({ ...settingsOf(node), ref: Math.max(nat.w, nat.h) }));
   node.remove();
   return g;
 }

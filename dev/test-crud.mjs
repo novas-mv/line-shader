@@ -52,6 +52,21 @@ const mk = (type, extra = {}) => {
       if (c.parent) c.parent.children = c.parent.children.filter(x => x !== c);
       c.parent = this; this.children.push(c);   // relative x/y kept, as Figma does
     },
+    insertChild(i, c){
+      if (c.parent) c.parent.children = c.parent.children.filter(x => x !== c);
+      c.parent = this; this.children.splice(i, 0, c);
+    },
+    /* the Scale tool: everything inside scales about the node's own origin */
+    rescale(k){
+      const walk = (n, top) => {
+        n.width *= k; n.height *= k;
+        if (!top){ n._x *= k; n._y *= k; }
+        if (n.vectorPaths) n.vectorPaths = n.vectorPaths.map(p =>
+          ({ ...p, data: p.data.replace(/-?\d+(\.\d+)?/g, v => String(+v * k)) }));
+        n.children.forEach(c => walk(c, false));
+      };
+      walk(this, true);
+    },
     remove(){
       if (this.parent) this.parent.children = this.parent.children.filter(x => x !== this);
       this.parent = null; this._removed = true;
@@ -81,10 +96,11 @@ const mk = (type, extra = {}) => {
 const page = mk('PAGE');
 page.selection = [];
 const notices = [];
+let lastSpine = null;
 
 globalThis.figma = {
   currentPage: page,
-  showUI(){}, ui: { postMessage(){}, onmessage: null }, on(){},
+  showUI(){}, ui: { postMessage(m){ if (m.type === 'spine') lastSpine = m; }, onmessage: null }, on(){},
   notify(m, o){ notices.push({ m, error: !!(o && o.error) }); },
   createVector(){ const n = mk('VECTOR'); page.appendChild(n); return n; },
   createRectangle(){ const n = mk('RECTANGLE'); page.appendChild(n); return n; },
@@ -94,11 +110,11 @@ globalThis.figma = {
     for (let i = 0; i < 4; i++) f.appendChild(mk('VECTOR'));
     page.appendChild(f); return f;
   },
-  group(nodes, parent){
+  group(nodes, parent, index){
     /* figma.group keeps children where they are on the canvas */
     const g = mk('GROUP');
     const keep = nodes.map(n => absOf(n));
-    parent.appendChild(g);
+    if (index >= 0) parent.insertChild(index, g); else parent.appendChild(g);
     nodes.forEach((n, i) => {
       g.appendChild(n);
       const o = originOf(g);
@@ -250,6 +266,60 @@ ok('delete removed the ribbon', vec._removed);
   ok('updating a vector ribbon does not walk the curve',
      !!sp2 && near(ABS(sp2).x, drawnAbs.x) && near(ABS(sp2).y, drawnAbs.y),
      sp2 ? `${ABS(sp2).x},${ABS(sp2).y} vs ${drawnAbs.x},${drawnAbs.y}` : 'no spine');
+}
+
+/* ---- update IN PLACE -----------------------------------------------------
+   The designer moved and scaled the ribbon, renamed it, and it sits between
+   other layers. Apply must replace it right there: same slot in the layer
+   stack, same place, same size — not drop a fresh copy on top somewhere. */
+for (const flat of [false, true]){
+  const near = (a, b, t = 0.51) => Math.abs(a - b) <= t;
+  const board = mk('FRAME'); board._x = 50; board._y = 40; page.appendChild(board);
+  const below = mk('RECTANGLE'); board.appendChild(below);
+  const curve = figma.createVector();
+  curve.vectorPaths = [{ data: 'M 0 0 L 40 20' }];
+  board.appendChild(curve); curve.x = 100; curve.y = 60;
+  const above = mk('RECTANGLE'); board.appendChild(above);
+  const mode = flat ? 'flattened' : 'vector';
+
+  page.selection = [curve];
+  await send(apply(flat));
+  const rib = page.selection[0];
+  ok(mode + ': a new ribbon takes the curve\'s layer slot', board.children.indexOf(rib) === 1,
+     board.children.map(c => c.type).join(','));
+  const natural = Math.max(rib.children.find(c => c.name !== 'spine').width,
+                           rib.children.find(c => c.name !== 'spine').height);
+
+  rib.rescale(2); rib.x += 30; rib.y += 15; rib.name = 'Hero ribbon'; rib.opacity = .6;
+  const spBefore = ABS(spineOf(rib));
+  const count = board.children.length;
+
+  page.selection = [rib];
+  await globalThis.figma.ui.onmessage({ type: 'need-spine' });
+  ok(mode + ': a scaled ribbon is re-shaded from its natural-size curve',
+     lastSpine && lastSpine.d === 'M 0 0 L 40 20', lastSpine && lastSpine.d);
+
+  await send(apply(flat));
+  const up = page.selection[0];
+  ok(mode + ': update removes the old ribbon (no duplicate)', rib._removed && board.children.length === count,
+     `${count} -> ${board.children.length}`);
+  ok(mode + ': update keeps the layer slot', board.children.indexOf(up) === 1,
+     String(board.children.indexOf(up)));
+  const art = up.children.find(c => c.name !== 'spine');
+  ok(mode + ': update keeps the scale', near(Math.max(art.width, art.height), natural * 2),
+     `${Math.max(art.width, art.height)} vs ${natural * 2}`);
+  ok(mode + ': update keeps the position', near(ABS(spineOf(up)).x, spBefore.x) && near(ABS(spineOf(up)).y, spBefore.y));
+  ok(mode + ': artwork sits on the scaled curve',
+     near(ABS(art).x, spBefore.x + 5 * 2) && near(ABS(art).y, spBefore.y + 7 * 2),
+     `${ABS(art).x},${ABS(art).y} vs ${spBefore.x + 10},${spBefore.y + 14}`);
+  ok(mode + ': update keeps the name and opacity', up.name === 'Hero ribbon' && up.opacity === .6, up.name);
+
+  page.selection = [up];
+  await send(apply(flat));
+  const again = page.selection[0];
+  const art2 = again.children.find(c => c.name !== 'spine');
+  ok(mode + ': a second update does not compound the scale',
+     near(Math.max(art2.width, art2.height), natural * 2), String(Math.max(art2.width, art2.height)));
 }
 
 const legacy = figma.createRectangle();
